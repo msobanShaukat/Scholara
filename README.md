@@ -4,7 +4,7 @@
 [![HEC](https://img.shields.io/badge/HEC-Recognised-success)](https://www.hec.gov.pk/)
 [![NAVTTC](https://img.shields.io/badge/NAVTTC-Approved-green)](https://www.navttc.gov.pk/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28+-FF4B4B?logo=streamlit)](https://streamlit.io/)
-[![Gemini](https://img.shields.io/badge/Powered%20by-Gemini%201.5%20Flash-purple?logo=google)](https://aistudio.google.com/)
+[![Gemini](https://img.shields.io/badge/Powered%20by-Gemini%203.5%20Flash-purple?logo=google)](https://aistudio.google.com/)
 [![Airtable](https://img.shields.io/badge/Database-Airtable-orange?logo=airtable)](https://airtable.com/)
 
 > **Final Project** — AI Skillbridge Prime Minister's Youth Programme, HEC, NAVTTC  
@@ -74,16 +74,16 @@ The prompt design is completely hand‑crafted for this app — no template or t
 
 ## 🛠️ Tools, Services & AI Models
 
-| Layer         | Technology                                      |
-|---------------|-------------------------------------------------|
-| **Frontend**  | Streamlit (Python)                              |
-| **PDF Text Extraction** | pdfplumber                         |
-| **Docx Export** | python-docx                                   |
-| **AI Model**  | Google Gemini 1.5 Flash (`gemini-2.5-flash-lite`), free tier |
-| **Database**  | Airtable (free plan, personal access token)     |
-| **Hosting**   | Streamlit Community Cloud                       |
-| **Secrets**   | Streamlit Secrets (never committed to GitHub)   |
-| **Version Control** | Git & GitHub (public repo)                |
+| Layer         | Technology                                                   |
+|---------------|--------------------------------------------------------------|
+| **Frontend**  | Streamlit (Python)                                           |
+| **PDF Text Extraction** | pdfplumber                                         |
+| **Docx Export** | python-docx                                                |
+| **AI Model**  | Google Gemini 3.5 Flash (`gemini-3.5-flash-lite`), free tier |
+| **Database**  | Airtable (free plan, personal access token)                  |
+| **Hosting**   | Streamlit Community Cloud                                    |
+| **Secrets**   | Streamlit Secrets (never committed to GitHub)                |
+| **Version Control** | Git & GitHub (public repo)                             |
 
 ---
 
