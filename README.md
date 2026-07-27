@@ -88,8 +88,6 @@ The prompt design is completely hand‑crafted for this app — no template or t
 
 ## 📸 Screenshots
 
-> *(Replace these placeholders with actual screenshots of your app. Drag & drop the images into your GitHub repo and update the links.)*
-
 ### 1. Home Page
 ![HOME](screenshots/HOME.PNG)
 *Hero section, trust strip, KPIs, and three quick‑action buttons.*
