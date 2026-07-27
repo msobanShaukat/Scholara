@@ -174,10 +174,9 @@ Open your browser at [http://localhost:8501](http://localhost:8500).
 **Soban Shaukat**  
 MS Artificial Intelligence, NUST Islamabad  
 AI Skillbridge – Prime Minister's Youth Programme  
-📧 scholara@nust.edu.pk (placeholder)
+📧 msobanshaukat@gmail.com
 
 > *“Scholara grew from my own frustration: writing a literature review for my thesis took 40+ hours. I built this tool so the next researcher doesn’t have to.”*
-
 ---
 
 © 2026 Scholara · v3.0.0 · Built with ❤️ in Pakistan
