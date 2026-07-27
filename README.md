@@ -56,7 +56,7 @@
 ## 🧠 The AI Feature (Gemini‑Powered Review Generation)
 
 **What it does:**  
-When you click “Generate Literature Review”, the full text of all uploaded papers is sent to **Google Gemini 1.5 Flash** together with a **custom system prompt**. The AI:
+When you click “Generate Literature Review”, the full text of all uploaded papers is sent to **Google Gemini 3.5 Flash Lite** together with a **custom system prompt**. The AI:
 - Clusters common themes
 - Identifies methodological patterns
 - Highlights contradictions and debates
