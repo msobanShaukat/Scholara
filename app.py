@@ -4,18 +4,19 @@
 # ============================================================
 #
 #  SETUP:
-#    pip install streamlit pdfplumber python-docx requests
+#    pip install streamlit pdfplumber python-docx requests google-generativeai
 #    streamlit run app.py
 #
-#  REAL API (optional):
-#    Create .streamlit/secrets.toml and add:
-#    GEMINI_API_KEY = "AIza-..."
-#    Without it the app runs in demo/mock mode.
+#  REQUIRED SECRETS (.streamlit/secrets.toml):
+#    GEMINI_API_KEY = "AIza..."
+#    AIRTABLE_API_KEY = "key..."
+#    AIRTABLE_BASE_ID = "app..."
 # ============================================================
 
 import io
 import re
 import time
+import json
 import requests
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,63 +25,59 @@ import pdfplumber
 import streamlit as st
 from docx import Document
 import google.generativeai as genai
-import firebase_admin
-from firebase_admin import credentials, firestore
-import json
-from supabase import Client
 
-def debug_secrets() -> bool:
+# ── Airtable helpers ─────────────────────────────────────────
+def airtable_create_record(table_name: str, fields: dict) -> Optional[str]:
+    """Insert a row into Airtable. Returns the record ID."""
     try:
-        url = st.secrets.get("SUPABASE_URL")
-        key = st.secrets.get("SUPABASE_KEY")
-        return bool(url and key)
-    except:
-        return False
-
-@st.cache_resource
-def get_firestore():
-    try:
-        cred_dict = json.loads(st.secrets["FIREBASE_CREDENTIALS"])
-        cred = credentials.Certificate(cred_dict)
-        try:
-            firebase_admin.get_app()
-        except ValueError:
-            firebase_admin.initialize_app(cred)
-        return firestore.client()
-    except Exception as e:
-        st.warning(f"Firebase init error: {e}")
+        api_key = st.secrets["AIRTABLE_API_KEY"]
+        base_id = st.secrets["AIRTABLE_BASE_ID"]
+    except Exception:
+        st.warning("Airtable not configured – reviews saved in session only.")
         return None
 
-def get_user_id() -> str:
-    return "soban_nust"   # <-- change to your name
+    url = f"https://api.airtable.com/v0/{base_id}/{table_name}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    data = {"records": [{"fields": fields}]}
+    resp = requests.post(url, json=data, headers=headers)
+    if resp.status_code == 200:
+        return resp.json()["records"][0]["id"]
+    else:
+        st.warning(f"Airtable error: {resp.text}")
+        return None
 
-# ── SUPABASE CLIENT ──────────────────────────────────────────
-@st.cache_resource
-def get_supabase() -> Optional[Client]:
+
+def airtable_get_records(table_name: str, user_id: str = None) -> list:
+    """Fetch all records, optionally filtered by user_id."""
     try:
-        url = st.secrets.get("SUPABASE_URL")
-        key = st.secrets.get("SUPABASE_KEY")
-        if url and key:
-            return create_client(url, key)
+        api_key = st.secrets["AIRTABLE_API_KEY"]
+        base_id = st.secrets["AIRTABLE_BASE_ID"]
     except Exception:
-        pass
-    return None
+        return []
+
+    url = f"https://api.airtable.com/v0/{base_id}/{table_name}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    params = {}
+    if user_id:
+        params["filterByFormula"] = f"{{user_id}}='{user_id}'"
+    resp = requests.get(url, headers=headers, params=params)
+    if resp.status_code == 200:
+        return resp.json().get("records", [])
+    else:
+        st.warning(f"Airtable read error: {resp.text}")
+        return []
+
 
 def get_user_id() -> str:
-    """
-    Simple user identifier – uses a fixed ID for demo,
-    but you can replace with a text input or auth later.
-    """
-    # Option 1: Hardcode for testing (change this to your name)
-    # return "soban_nust"
-
-    # Option 2: Let the user enter their name in sidebar (recommended)
     if "user_id" not in st.session_state:
         st.session_state.user_id = "guest"
     return st.session_state.user_id
 
+
 # ── 1. PAGE CONFIG ───────────────────────────────────────────
-# Must be the very first Streamlit call.
 st.set_page_config(
     page_title="Scholara — AI Literature Review",
     page_icon="📚",
@@ -103,21 +100,13 @@ REVIEW_LENGTHS  = ["Short (~700 words)", "Medium (~1,200 words)", "Detailed (~1,
 TONES           = ["Academic", "Concise", "Critical", "Neutral"]
 SORT_OPTIONS    = ["Newest first", "Oldest first", "Title A-Z", "Title Z-A", "Most papers"]
 
-ALL_PAGES     = ["Home", "Demo Wizard", "Dashboard",
-                 "How It Works", "Features", "Use Cases",
-                 "Pricing", "About", "Blog"]
-NAV_WORKSPACE = ["Home", "Demo Wizard", "Dashboard"]
-NAV_PRODUCT   = ["How It Works", "Features", "Use Cases", "Pricing"]
-NAV_COMPANY   = ["About", "Blog"]
-
 # ── 3. SESSION STATE ─────────────────────────────────────────
-# Initialised BEFORE any CSS or UI calls — fixes Bug #10.
 def _init_state() -> None:
     defaults: Dict[str, Any] = {
         "page":        "Home",
         "reviews":     [],
-        "cur_review":  None,       # text of the review currently shown
-        "cur_meta":    {},         # meta dict for the review currently shown
+        "cur_review":  None,
+        "cur_meta":    {},
         "search":      "",
         "sort_by":     "Newest first",
         "show_tips":   True,
@@ -155,7 +144,6 @@ def nav_to(page: str) -> None:
     st.rerun()
 
 # ── 5. DATA / GENERATION HELPERS ────────────────────────────
-
 def validate_uploads(files: List[Any]) -> Dict[str, Any]:
     if not files:
         return {"ok": False, "msg": "Upload at least one PDF."}
@@ -173,7 +161,6 @@ def validate_uploads(files: List[Any]) -> Dict[str, Any]:
 
 @st.cache_data(show_spinner=False)
 def _extract_pdf(name: str, data: bytes) -> str:
-    """Cached per (name, data) — re-uploading same file costs nothing."""
     blocks: List[str] = []
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         for page in pdf.pages:
@@ -207,17 +194,9 @@ def extract_all(files: List[Any]) -> Tuple[str, List[str]]:
 
 
 def build_prompt(
-    text: str,
-    topic: str,
-    citation: str,
-    length: str,
-    tone: str,
-    inc_lim: bool,
-    inc_gaps: bool,
-    inc_table: bool,
-    inc_impl: bool,
+    text: str, topic: str, citation: str, length: str, tone: str,
+    inc_lim: bool, inc_gaps: bool, inc_table: bool, inc_impl: bool,
 ) -> str:
-    """All args are explicit keyword-safe positional params — fixes Bug #1."""
     secs = [
         "1. Introduction",
         "2. Thematic Synthesis",
@@ -252,20 +231,14 @@ def build_prompt(
         + text
     )
 
-import google.generativeai as genai   # add this import at the top of app.py
 
 def _call_api(prompt: str) -> Optional[str]:
-    """
-    Uses Google Gemini 1.5 Flash (free tier) instead of Claude.
-    Falls back to mock if GEMINI_API_KEY is missing.
-    """
     try:
         api_key = st.secrets.get("GEMINI_API_KEY", "")
     except Exception:
         api_key = ""
 
     if not api_key:
-        # ── Demo / mock mode ──
         time.sleep(0.8)
         return (
             "## Introduction\n"
@@ -290,7 +263,6 @@ def _call_api(prompt: str) -> Optional[str]:
             "for full generation._"
         )
 
-    # ── Real Gemini call ──
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-3.5-flash-lite')
     try:
@@ -302,19 +274,9 @@ def _call_api(prompt: str) -> Optional[str]:
 
 
 def generate_review(
-    text: str,
-    topic: str,
-    citation: str,
-    length: str,
-    tone: str,
-    inc_lim: bool,
-    inc_gaps: bool,
-    inc_table: bool,
-    inc_impl: bool,
+    text: str, topic: str, citation: str, length: str, tone: str,
+    inc_lim: bool, inc_gaps: bool, inc_table: bool, inc_impl: bool,
 ) -> Optional[str]:
-    """
-    All params explicit — no **kwargs unpacking mismatch (fixes Bug #1).
-    """
     try:
         prompt = build_prompt(
             text=text, topic=topic, citation=citation,
@@ -333,7 +295,6 @@ def export_txt(text: str) -> bytes:
 
 
 def export_docx(text: str, title: str = "Literature Review") -> bytes:
-    """Wrapped in caller try/except — fixes Bug #8."""
     doc = Document()
     doc.add_heading(title, 1)
     for block in text.split("\n\n"):
@@ -355,9 +316,6 @@ def export_docx(text: str, title: str = "Literature Review") -> bytes:
 
 
 def meta_chips_html(meta: Dict) -> str:
-    """
-    Uses the correct key names matching generate_review params (fixes Bug #11).
-    """
     bits = []
     for k in ["citation", "tone", "length"]:
         v = meta.get(k)
@@ -370,97 +328,40 @@ def meta_chips_html(meta: Dict) -> str:
     return "".join(bits)
 
 
-# def save_review(title: str, text: str, papers: List[str], meta: Dict) -> None:
-#     entry = {
-#         "title":  title.strip() or f"Review {now_str()}",
-#         "date":   now_str(),
-#         "text":   text,
-#         "papers": papers,
-#         "meta":   meta,
-#     }
-#     st.session_state.reviews.append(entry)
-#     st.session_state.cur_review = text
-#     st.session_state.cur_meta   = meta
-# def save_review(title: str, text: str, papers: List[str], meta: Dict) -> None:
-#     # 1. Save to session state (fast UI)
-#     entry = {
-#         "title":  title.strip() or f"Review {now_str()}",
-#         "date":   now_str(),
-#         "text":   text,
-#         "papers": papers,
-#         "meta":   meta,
-#     }
-#     st.session_state.reviews.append(entry)
-#     st.session_state.cur_review = text
-#     st.session_state.cur_meta   = meta
-
-#     # 2. Save to Supabase (persistent)
-#     sb = get_supabase()
-#     if sb:
-#         try:
-#             user_id = get_user_id()
-#             st.toast(f"Saving review for user: {user_id}")  # DEBUG
-#             result = sb.table("reviews").insert({
-#                 "user_id": user_id,
-#                 "title": entry["title"],
-#                 "review_text": text,
-#                 "papers": papers,
-#                 "meta": meta,
-#             }).execute()
-#             st.toast("✅ Saved to cloud!")  # DEBUG
-#         except Exception as e:
-#             st.warning(f"Could not save to cloud: {e}")
-#     else:
-#         st.warning("⚠️ Supabase not connected – check secrets")
-
 def save_review(title: str, text: str, papers: List[str], meta: Dict) -> None:
-    st.toast(f"🔵 Saving review: {title[:30]}...")
-    
-    # Session save (unchanged)
     entry = {
         "title": title.strip() or f"Review {now_str()}",
-        "date":  now_str(),
-        "text":  text,
+        "date": now_str(),
+        "text": text,
         "papers": papers,
-        "meta":  meta,
+        "meta": meta,
     }
     st.session_state.reviews.append(entry)
     st.session_state.cur_review = text
     st.session_state.cur_meta   = meta
 
-    # 🔥 Firestore save
-    db = get_firestore()
-    if db:
-        try:
-            user_id = get_user_id()
-            doc_ref = db.collection("reviews").document()
-            doc_ref.set({
-                "user_id": user_id,
-                "title": entry["title"],
-                "review_text": text,
-                "papers": papers,
-                "meta": meta,
-                "created_at": firestore.SERVER_TIMESTAMP
-            })
-            st.toast("✅ Saved to Firestore!")
-        except Exception as e:
-            st.toast(f"❌ Firestore error: {str(e)[:100]}")
-            st.write("Error:", e)
+    fields = {
+        "user_id": get_user_id(),
+        "title": entry["title"],
+        "review_text": text,
+        "papers": json.dumps(papers),
+        "meta": json.dumps(meta),
+        "created_at": now_str()
+    }
+    record_id = airtable_create_record("reviews", fields)
+    if record_id:
+        st.toast("✅ Saved to cloud (Airtable)!")
     else:
-        st.warning("Firestore client not available")
+        st.toast("⚠️ Saved locally only – check secrets")
 
-# ── 6. CSS  (injected once, after session state exists) ──────
-# Fixes Bug #4: CSS no longer depends on selectbox values that
-# haven't rendered yet; theme is read from already-initialised
-# session state only.
+
+# ── 6. CSS ────────────────────────────────────────────────────
 def _inject_css() -> None:
     st.markdown(
         """
 <style>
-/* ── Google Fonts ── */
 @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700;800&display=swap');
 
-/* ── Tokens ── */
 :root {
   --ink:       #0D1B2A;
   --navy:      #1B2E4B;
@@ -483,12 +384,10 @@ def _inject_css() -> None:
   --r-xl: 20px; --r-lg: 16px; --r-md: 10px; --r-sm: 6px;
 }
 
-/* ── Base ── */
 html, body { font-family:'Inter',system-ui,sans-serif !important; background:#F8FAFC !important; }
 .stApp     { background:#F8FAFC !important; font-family:'Inter',system-ui,sans-serif !important; }
 div.block-container { max-width:1160px !important; padding-top:1.2rem !important; }
 
-/* ── Sidebar ── */
 section[data-testid="stSidebar"] {
   background: var(--navy) !important;
   border-right: 1px solid var(--navy-mid);
@@ -500,11 +399,9 @@ section[data-testid="stSidebar"] h3,
 section[data-testid="stSidebar"] strong { color:#FFFFFF !important; }
 section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font-size:0.87rem; }
 
-/* ── Scrollbar ── */
 ::-webkit-scrollbar { width:5px; }
 ::-webkit-scrollbar-thumb { background:var(--slate-400); border-radius:3px; }
 
-/* ── Skip link ── */
 .skip-link {
   position:absolute; top:-48px; left:8px;
   background:var(--indigo); color:#fff !important;
@@ -513,7 +410,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
 }
 .skip-link:focus { top:8px; }
 
-/* ── Hero ── */
 .hero-wrap {
   background: linear-gradient(135deg, var(--navy) 0%, var(--navy-mid) 60%, #1B3A6B 100%);
   border-radius: var(--r-xl); padding: 52px 48px 44px;
@@ -543,7 +439,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
   line-height:1.6; max-width:520px; margin:0;
 }
 
-/* ── Trust strip ── */
 .trust-strip { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:24px; }
 .trust-item {
   display:flex; align-items:center; gap:6px;
@@ -553,7 +448,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
   box-shadow:var(--sh-sm);
 }
 
-/* ── KPI grid ── */
 .kpi-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:24px; }
 .kpi-card {
   background:var(--white); border:1px solid var(--slate-200);
@@ -570,7 +464,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
              font-size:1.6rem; color:var(--ink) !important; line-height:1; }
 .kpi-sub   { font-size:0.76rem; color:var(--slate-400) !important; margin-top:2px; }
 
-/* ── Section heading ── */
 .s-heading {
   font-family:'DM Serif Display',Georgia,serif;
   font-size:1.45rem; color:var(--ink) !important;
@@ -578,7 +471,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
 }
 .s-caption { font-size:0.86rem; color:var(--slate-400) !important; margin-bottom:18px; }
 
-/* ── Cards ── */
 .s-card {
   background:var(--white); border:1px solid var(--slate-200);
   border-radius:var(--r-lg); padding:20px 22px;
@@ -591,7 +483,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
 .s-card-dash   { border:1px dashed var(--slate-200); background:var(--slate-50);
                  text-align:center; padding:40px 24px; }
 
-/* ── Step bar ── */
 .step-bar { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-bottom:20px; }
 .step-item {
   background:var(--white); border:1px solid var(--slate-200);
@@ -602,7 +493,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
 .step-item.active { background:var(--indigo-dim); border-color:var(--indigo); color:var(--indigo) !important; }
 .step-item.done   { background:#ECFDF5; border-color:var(--success); color:var(--success) !important; }
 
-/* ── Chips ── */
 .chip {
   display:inline-block; background:var(--indigo-dim); color:var(--indigo) !important;
   border:1px solid #C7D0FF; border-radius:999px;
@@ -612,7 +502,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
 .chip-amber { background:var(--amber-lt); color:#92400E !important; border-color:#FCD9B6; }
 .chip-green { background:#ECFDF5; color:var(--success) !important; border-color:#BBF7D0; }
 
-/* ── Review cards (dashboard) ── */
 .rev-card { background:var(--white); border:1px solid var(--slate-200);
             border-radius:var(--r-lg); padding:16px 20px;
             margin-bottom:10px; box-shadow:var(--sh-sm); }
@@ -622,7 +511,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
 .rev-preview { font-size:0.85rem; color:var(--slate-600) !important; line-height:1.55;
                border-left:3px solid var(--slate-200); padding-left:10px; margin:8px 0 12px; }
 
-/* ── Pricing ── */
 .price-card {
   background:var(--white); border:1px solid var(--slate-200);
   border-radius:var(--r-xl); padding:26px 22px; box-shadow:var(--sh-sm);
@@ -637,7 +525,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
 .price-row  { display:flex; align-items:center; gap:8px; padding:5px 0;
               border-bottom:1px solid var(--slate-100); font-size:0.83rem; }
 
-/* ── Blog ── */
 .blog-card { background:var(--white); border:1px solid var(--slate-200);
              border-radius:var(--r-lg); padding:18px 20px; margin-bottom:10px;
              display:flex; align-items:flex-start; gap:14px; box-shadow:var(--sh-sm); }
@@ -646,7 +533,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
 .blog-title{ font-weight:600; color:var(--ink) !important; font-size:0.93rem; margin-bottom:3px; }
 .blog-meta { font-size:0.76rem; color:var(--slate-400) !important; }
 
-/* ── Tip box ── */
 .tip-box {
   background:var(--indigo-dim); border:1px solid #C7D0FF;
   border-left:4px solid var(--indigo); border-radius:var(--r-md);
@@ -654,16 +540,13 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
   margin-bottom:14px;
 }
 
-/* ── Divider ── */
 .s-div { height:1px; background:var(--slate-200); margin:22px 0; }
 
-/* ── Footer ── */
 .page-footer {
   text-align:center; font-size:0.76rem; color:var(--slate-400) !important;
   margin-top:44px; padding:16px 0 6px; border-top:1px solid var(--slate-200);
 }
 
-/* ── Sidebar brand / stat ── */
 .sb-brand { padding:14px 0 10px; border-bottom:1px solid rgba(255,255,255,.08); margin-bottom:10px; }
 .sb-name  { font-family:'DM Serif Display',Georgia,serif; font-size:1.25rem; color:#FFFFFF !important; }
 .sb-tag   { font-size:0.74rem; color:#475569 !important; margin-top:2px; }
@@ -673,7 +556,6 @@ section[data-testid="stSidebar"] .stRadio label { color:#94A3B8 !important; font
             padding:4px 0; border-bottom:1px solid rgba(255,255,255,.06); color:#94A3B8 !important; }
 .sb-val   { font-weight:700; color:#FFFFFF !important; }
 
-/* ── Streamlit overrides (surgical) ── */
 div[data-testid="stProgress"] > div > div > div {
   background:linear-gradient(90deg,var(--indigo),var(--indigo-lt)) !important;
   border-radius:999px !important;
@@ -695,7 +577,6 @@ div[data-testid="stProgress"] > div > div > div {
 }
 button:focus, a:focus, input:focus { outline:3px solid var(--indigo) !important; outline-offset:2px !important; }
 
-/* ── Responsive ── */
 @media(max-width:768px) {
   .hero-title { font-size:1.8rem !important; }
   .hero-wrap  { padding:34px 24px 28px; }
@@ -713,7 +594,6 @@ button:focus, a:focus, input:focus { outline:3px solid var(--indigo) !important;
     )
 
 _inject_css()
-
 
 # ── 7. SHARED UI HELPERS ─────────────────────────────────────
 def tip(msg: str) -> None:
@@ -756,10 +636,8 @@ def step_bar(current: int) -> None:
     st.markdown(f"<div class='step-bar'>{items}</div>", unsafe_allow_html=True)
     st.progress(min((current - 1) / 4, 1.0))
 
-
 # ── 8. SIDEBAR ───────────────────────────────────────────────
 def _sidebar() -> None:
-    # Brand
     st.sidebar.markdown(
         "<div class='sb-brand'>"
         "<div class='sb-name'>📚 " + APP_NAME + "</div>"
@@ -767,19 +645,13 @@ def _sidebar() -> None:
         "</div>",
         unsafe_allow_html=True,
     )
-with st.sidebar.expander("🔧 Debug Secrets", expanded=False):
-    if debug_secrets():
-        st.success("Secrets loaded ✅")
-    else:
-        st.error("Secrets NOT loaded ❌")
-    # Section headers + one radio for all pages
+
     st.sidebar.markdown("<div class='sb-group'>Workspace</div>", unsafe_allow_html=True)
     st.sidebar.markdown("", unsafe_allow_html=True)
     st.sidebar.markdown("<div class='sb-group'>Product</div>", unsafe_allow_html=True)
     st.sidebar.markdown("", unsafe_allow_html=True)
     st.sidebar.markdown("<div class='sb-group'>Company</div>", unsafe_allow_html=True)
 
-    # Single radio with all pages
     all_pages = ["Home", "Demo Wizard", "Dashboard",
                  "How It Works", "Features", "Use Cases", "Pricing",
                  "About", "Blog"]
@@ -802,7 +674,6 @@ with st.sidebar.expander("🔧 Debug Secrets", expanded=False):
         st.session_state.page = selected
         st.rerun()
 
-    # Quick actions
     st.sidebar.markdown("<div class='sb-group'>Quick actions</div>", unsafe_allow_html=True)
     qa1, qa2 = st.sidebar.columns(2)
     with qa1:
@@ -822,22 +693,18 @@ with st.sidebar.expander("🔧 Debug Secrets", expanded=False):
             else:
                 st.sidebar.info("No reviews yet.")
 
-    # ── USER ID INPUT (FIXED) ──
-with st.sidebar.expander("User", expanded=False):
-    # Read current value from session state
-    current_user = st.session_state.get("user_id", "guest")
-    new_id = st.text_input(
-        "Your ID (e.g., soban_nust)",
-        value=current_user,
-        key="user_id_input"
-    )
-    # Update session state if changed
-    if new_id != current_user:
-        st.session_state.user_id = new_id
-        st.rerun()
-    st.caption("Reviews are stored under this ID.")
+    with st.sidebar.expander("User", expanded=False):
+        current_user = st.session_state.get("user_id", "guest")
+        new_id = st.text_input(
+            "Your ID (e.g., soban_nust)",
+            value=current_user,
+            key="user_id_input"
+        )
+        if new_id != current_user:
+            st.session_state.user_id = new_id
+            st.rerun()
+        st.caption("Reviews are stored under this ID.")
 
-    # Session stats
     st.sidebar.markdown("<div class='sb-group'>Session</div>", unsafe_allow_html=True)
     n_rev    = len(st.session_state.reviews)
     n_papers = sum(len(r.get("papers", [])) for r in st.session_state.reviews)
@@ -857,46 +724,22 @@ with st.sidebar.expander("User", expanded=False):
         st.caption("Dark mode controls coming in v3.1.")
 
     st.sidebar.markdown("---")
-    st.sidebar.caption("In-session only — no data stored")
+    st.sidebar.caption("Cloud-backed (Airtable)")
     st.sidebar.caption("© 2026 Scholara")
-    
-    # if st.sidebar.button("🧪 Test Firestore Insert"):
-    #     db = get_firestore()
-    #     if db:
-    #     try:
-    #         # Insert a test document
-    #         doc_ref = db.collection("test_collection").document("test_doc")
-    #         doc_ref.set({
-    #             "message": "Hello from Streamlit!",
-    #             "timestamp": firestore.SERVER_TIMESTAMP
-    #         })
-    #         st.sidebar.success("✅ Test document inserted!")
-    #     except Exception as e:
-    #         st.sidebar.error(f"❌ Insert failed: {e}")
-    # else:
-    #     st.sidebar.error("❌ Firestore client is None")
-# if st.sidebar.button("🧪 Test Supabase Insert"):
-#     sb = get_supabase()
-#     if sb:
-#         try:
-#             result = sb.table("reviews").insert({
-#                 "user_id": "test_user",
-#                 "title": "Test Insert",
-#                 "review_text": "Testing from debug",
-#                 "papers": ["test.pdf"],
-#                 "meta": {"test": True}
-#             }).execute()
-#             st.sidebar.success(f"Insert success: {result.data}")
-#         except Exception as e:
-#             st.sidebar.error(f"Insert failed: {e}")
-#     else:
-#         st.sidebar.error("Supabase client is None")
-    
-    
-
 
 # ── 9. HOME ──────────────────────────────────────────────────
+# ── 9. HOME ──────────────────────────────────────────────────
 def home_page() -> None:
+    # callbacks that run before the next rerun
+    def go_demo():
+        st.session_state.page = "Demo Wizard"
+
+    def go_dash():
+        st.session_state.page = "Dashboard"
+
+    def go_how():
+        st.session_state.page = "How It Works"
+
     # Hero
     st.markdown(
         "<div class='hero-wrap'>"
@@ -908,17 +751,15 @@ def home_page() -> None:
         "</div>",
         unsafe_allow_html=True,
     )
-    # Trust strip
     st.markdown(
         "<div class='trust-strip'>"
-        "<span class='trust-item'>🔒 In-session only — no storage</span>"
+        "<span class='trust-item'>☁️ Cloud-backed (Airtable)</span>"
         "<span class='trust-item'>📚 Source-grounded synthesis</span>"
         "<span class='trust-item'>📝 Export to TXT &amp; DOCX</span>"
         "<span class='trust-item'>🎓 APA · IEEE · MLA · Chicago · Vancouver</span>"
         "</div>",
         unsafe_allow_html=True,
     )
-    # KPIs
     kpi_row([
         ("Time saved / review", "30–40 hrs", "per literature review"),
         ("Upload volume",       "50 PDFs",   "per review session"),
@@ -927,14 +768,14 @@ def home_page() -> None:
 
     c1, c2, c3 = st.columns([1.1, 1, 1])
     with c1:
-        if st.button("🚀 Start Demo Wizard", type="primary", use_container_width=True):
-            nav_to("Demo Wizard")
+        st.button("🚀 Start Demo Wizard", type="primary", use_container_width=True,
+                  key="home_demo", on_click=go_demo)
     with c2:
-        if st.button("📊 Open Dashboard", use_container_width=True):
-            nav_to("Dashboard")
+        st.button("📊 Open Dashboard", use_container_width=True,
+                  key="home_dash", on_click=go_dash)
     with c3:
-        if st.button("📖 How It Works", use_container_width=True):
-            nav_to("How It Works")
+        st.button("📖 How It Works", use_container_width=True,
+                  key="home_how", on_click=go_how)
 
     divider()
     page_head("Built for researchers who are tired of formatting")
@@ -953,7 +794,7 @@ def home_page() -> None:
         st.markdown(
             "<div class='s-card s-card-accent'><strong>Searchable dashboard</strong>"
             "<p style='font-size:.86rem;color:var(--slate-600);margin-top:6px;'>"
-            "All session reviews in one place — searchable, sortable, re-downloadable.</p></div>"
+            "All reviews in one place — searchable, sortable, re-downloadable.</p></div>"
             "<div class='s-card s-card-accent'><strong>Source-grounded output</strong>"
             "<p style='font-size:.86rem;color:var(--slate-600);margin-top:6px;'>"
             "AI synthesises only from your uploads. Missing evidence is flagged, not invented.</p></div>",
@@ -981,13 +822,10 @@ def home_page() -> None:
             )
     st.markdown("<div class='page-footer'>© 2026 Scholara · v" + APP_VERSION + "</div>",
                 unsafe_allow_html=True)
-
-
 # ── 10. DEMO WIZARD ──────────────────────────────────────────
 def demo_wizard_page() -> None:
     page_head("Demo Wizard", "Guided 4-step workflow — each step confirmed before the next.")
 
-    # Determine current logical step
     step = 1
     if st.session_state.cur_review:
         step = 4
@@ -997,12 +835,11 @@ def demo_wizard_page() -> None:
     step_bar(step)
     divider()
 
-    # ── STEP 1: Upload ───────────────────────────────────────
+    # Step 1: Upload
     page_head("Step 1 — Upload your papers",
               "Add up to 50 PDFs. Text-based PDFs extract best.")
     tip("Run OCR first on scanned image PDFs for reliable text extraction.")
 
-    # Unique key prevents widget conflict on re-run (fixes Bug #7)
     uploaded = st.file_uploader(
         "Choose PDF files",
         type=["pdf"],
@@ -1031,11 +868,11 @@ def demo_wizard_page() -> None:
             "</div>",
             unsafe_allow_html=True,
         )
-        return      # stop — no files, nothing else to show
+        return
 
     divider()
 
-    # ── STEP 2: Configure ────────────────────────────────────
+    # Step 2: Configure
     page_head("Step 2 — Configure your review")
 
     cl, cr = st.columns([1.05, 1], gap="large")
@@ -1054,7 +891,6 @@ def demo_wizard_page() -> None:
         inc_table = st.checkbox("Methods comparison table",           value=False)
         inc_impl  = st.checkbox("Practical implications",             value=False)
 
-        # Live chip preview
         preview = (
             f"<span class='chip'>{citation}</span>"
             f"<span class='chip'>{tone}</span>"
@@ -1073,7 +909,7 @@ def demo_wizard_page() -> None:
 
     divider()
 
-    # ── STEP 3: Generate ─────────────────────────────────────
+    # Step 3: Generate
     page_head("Step 3 — Generate")
     gc, nc = st.columns([1, 1.5], gap="large")
     with gc:
@@ -1081,7 +917,7 @@ def demo_wizard_page() -> None:
                                 type="primary", use_container_width=True)
     with nc:
         st.markdown("<div class='tip-box' style='margin:0;'>"
-                    "⏱️ Powered by Claude — output grounded in your papers only.</div>",
+                    "⏱️ Powered by Gemini — output grounded in your papers only.</div>",
                     unsafe_allow_html=True)
 
     if gen_clicked:
@@ -1104,9 +940,8 @@ def demo_wizard_page() -> None:
                 return
 
             status.write(f"  ✓ {len(all_text):,} characters from {len(uploaded)} file(s).")
-            status.write("Phase 3/3 · Generating with Claude…")
+            status.write("Phase 3/3 · Generating with Gemini…")
 
-            # All args passed explicitly — no **kwargs (fixes Bug #1)
             result = generate_review(
                 text=all_text, topic=topic, citation=citation,
                 length=length, tone=tone,
@@ -1128,11 +963,11 @@ def demo_wizard_page() -> None:
         title = topic.strip() or f"Literature Review {now_str()}"
         save_review(title, result, [f.name for f in uploaded], meta)
         st.success(f"Saved — {word_count(result):,} words generated.")
-        st.rerun()   # re-render so step bar jumps to 4
+        st.rerun()
 
     divider()
 
-    # ── STEP 4: Export ───────────────────────────────────────
+    # Step 4: Export
     page_head("Step 4 — Review &amp; export")
     if not st.session_state.cur_review:
         st.info("Generate a review above to unlock export.")
@@ -1162,7 +997,6 @@ def demo_wizard_page() -> None:
                            file_name=fname + ".txt", mime="text/plain",
                            use_container_width=True)
     with d2:
-        # Fixes Bug #8: error handling around docx export
         try:
             st.download_button("📄 Download DOCX", data=export_docx(text, title),
                                file_name=fname + ".docx",
@@ -1191,62 +1025,51 @@ def _parse_dt(s: str) -> datetime:
     try:    return datetime.strptime(s, "%Y-%m-%d %H:%M")
     except: return datetime.min
 
-# def dashboard_page() -> None:
-#     page_head("Dashboard", "All session reviews — searchable, sortable, re-downloadable.")
-#     reviews = st.session_state.reviews
-
-#     if not reviews:
-#         st.markdown(
-#             "<div class='s-card s-card-dash'>"
-#             "<div style='font-size:2.5rem;margin-bottom:10px;'>📂</div>"
-#             "<strong style='color:var(--slate-600);'>No reviews yet</strong><br/>"
-#             "<span style='font-size:.86rem;color:var(--slate-400);'>"
-#             "Use Demo Wizard to generate your first review.</span></div>",
-#             unsafe_allow_html=True,
-#         )
-#         if st.button("Go to Demo Wizard", type="primary"):
-#             nav_to("Demo Wizard")
-#         return
 def dashboard_page() -> None:
-    page_head("Dashboard", "All session reviews…")
-    
-    db = get_firestore()
-    if db:
+    page_head("Dashboard", "All reviews — loaded from cloud (Airtable)")
+
+    # Load from Airtable
+    user_id = get_user_id()
+    records = airtable_get_records("reviews", user_id)
+    cloud_reviews = []
+    for rec in records:
+        fields = rec.get("fields", {})
         try:
-            user_id = get_user_id()
-            docs = db.collection("reviews") \
-                     .where("user_id", "==", user_id) \
-                     .order_by("created_at", direction=firestore.Query.DESCENDING) \
-                     .stream()
-            db_reviews = []
-            for doc in docs:
-                data = doc.to_dict()
-                db_reviews.append({
-                    "title": data["title"],
-                    "date": data["created_at"].strftime("%Y-%m-%d %H:%M") if data.get("created_at") else now_str(),
-                    "text": data["review_text"],
-                    "papers": data.get("papers", []),
-                    "meta": data.get("meta", {}),
-                    "id": doc.id,
-                })
-            st.session_state.reviews = db_reviews
-            st.toast(f"📥 Loaded {len(db_reviews)} reviews from Firestore")
-        except Exception as e:
-            st.toast(f"❌ Load error: {str(e)[:100]}")
-    else:
-        st.warning("Firestore client not available")
-    
+            papers_list = json.loads(fields.get("papers", "[]"))
+        except:
+            papers_list = []
+        try:
+            meta_dict = json.loads(fields.get("meta", "{}"))
+        except:
+            meta_dict = {}
+        cloud_reviews.append({
+            "title": fields.get("title", "Untitled"),
+            "date": fields.get("created_at", now_str()),
+            "text": fields.get("review_text", ""),
+            "papers": papers_list,
+            "meta": meta_dict,
+        })
+
+    st.session_state.reviews = cloud_reviews
     reviews = st.session_state.reviews
-    # ... rest of your dashboard (KPIs, search, cards, etc.) remains unchanged ...
-    # ... rest of dashboard ...
-    # ... rest of the dashboard remains unchanged ...
 
+    if not reviews:
+        st.markdown(
+            "<div class='s-card s-card-dash'>"
+            "<div style='font-size:2.5rem;margin-bottom:10px;'>📂</div>"
+            "<strong style='color:var(--slate-600);'>No reviews yet</strong><br/>"
+            "<span style='font-size:.86rem;color:var(--slate-400);'>"
+            "Use Demo Wizard to generate your first review.</span></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Go to Demo Wizard", type="primary"):
+            nav_to("Demo Wizard")
+        return
 
-    # KPIs
     total_papers = sum(len(r.get("papers", [])) for r in reviews)
     total_words  = sum(word_count(r.get("text", "")) for r in reviews)
     kpi_row([
-        ("Total reviews",          str(len(reviews)),    "this session"),
+        ("Total reviews",          str(len(reviews)),    "cloud-backed"),
         ("Total papers processed", str(total_papers),    "across all reviews"),
         ("Total output",           f"{total_words:,} w", "estimated word count"),
     ])
@@ -1270,13 +1093,11 @@ def dashboard_page() -> None:
             st.session_state.sort_by = "Newest first"
             st.rerun()
 
-    # Filter
     q = st.session_state.search.strip().lower()
     items = [r for r in reviews if not q or q in (
         r.get("title","") + r.get("text","") + " ".join(r.get("papers",[]))
     ).lower()]
 
-    # Sort
     sb = st.session_state.sort_by
     rev = sb in ("Newest first", "Title Z-A", "Most papers")
     key_fn = {
@@ -1310,7 +1131,6 @@ def dashboard_page() -> None:
 
         rc1, rc2, rc3, rc4 = st.columns([1, 1, 1, 0.55])
         with rc1:
-            # Fixes Bug #9: set state then rerun (no double write)
             if st.button("Open", key=f"open_{i}", use_container_width=True):
                 st.session_state.cur_review = text
                 st.session_state.cur_meta   = r.get("meta", {})
@@ -1349,7 +1169,7 @@ def dashboard_page() -> None:
             st.session_state.cur_review = None
             st.rerun()
 
-    st.markdown("<div class='page-footer'>Session-only storage — resets on tab close.</div>",
+    st.markdown("<div class='page-footer'>Cloud-backed storage — reviews persist across sessions.</div>",
                 unsafe_allow_html=True)
 
 
@@ -1363,8 +1183,8 @@ def how_it_works_page() -> None:
         ("02","⚙️","Configure your output",
          "Choose citation style, review depth, tone, and optional sections (gaps, limitations, methods table).",
          "Tip: A specific research topic focuses the synthesis significantly."),
-        ("03","🧠","Claude reads and synthesises",
-         "Text is extracted and sent to Claude. It clusters themes, identifies contradictions, "
+        ("03","🧠","Gemini reads and synthesises",
+         "Text is extracted and sent to Gemini. It clusters themes, identifies contradictions, "
          "maps gaps, and writes a grounded review — citing only your papers.",
          "Note: Generation takes 20-90 seconds depending on corpus size."),
         ("04","📝","Download and refine",
@@ -1403,12 +1223,12 @@ def features_page() -> None:
     page_head("Features", "Everything built in — no extensions required.")
     FEATS = [
         ("📤","Multi-PDF upload", f"Up to {MAX_FILES} files, {MAX_TOTAL_MB} MB total."),
-        ("🧠","Claude synthesis", "Theme clustering, contradiction detection, gap mapping."),
+        ("🧠","Gemini-powered synthesis", "Theme clustering, contradiction detection, gap mapping."),
         ("🎓","5 citation styles","APA 7, IEEE, MLA 9, Chicago 17, Vancouver."),
         ("⚙️","Depth & tone", "Short to Detailed. Academic, Concise, Critical, Neutral."),
         ("🔍","Gap analysis", "Optional section mapping underexplored areas."),
         ("📊","Methods table", "Plain-text comparison table of methodologies."),
-        ("📁","Session dashboard","Searchable, sortable review history."),
+        ("📁","Cloud dashboard","Searchable, sortable review history, backed by Airtable."),
         ("📝","Export-ready", ".txt and .docx with heading structure applied."),
         ("♿","Accessible", "Keyboard nav, focus outlines, skip link, semantic HTML."),
     ]
@@ -1555,7 +1375,7 @@ def pricing_page() -> None:
         ("What if my PDF is scanned?",
          "Run OCR first (Adobe Acrobat, Smallpdf, or open-source OCRmyPDF), then upload."),
         ("Which AI model powers Scholara?",
-         "claude-sonnet-4-6 by Anthropic, chosen for academic reading and synthesis strength."),
+         "Gemini 1.5 Flash, chosen for academic reading and synthesis strength."),
     ]
     for q, a in FAQ:
         with st.expander(q):
@@ -1595,8 +1415,8 @@ def about_page() -> None:
     divider()
     page_head("Principles")
     PRINCIPLES = [
-        ("🔒","Privacy by default","In-session only. Nothing written to persistent storage."),
-        ("📎","Source-grounded","Claude synthesises only from your uploaded papers."),
+        ("🔒","Privacy by default","Reviews stored securely in your Airtable base."),
+        ("📎","Source-grounded","Gemini synthesises only from your uploaded papers."),
         ("✏️","Draft, not final","All output is a starting point — review and revise."),
         ("♿","Accessible","Keyboard nav, focus outlines, skip link, semantic HTML."),
     ]
@@ -1666,7 +1486,34 @@ PAGE_FN = {
     "Blog":         blog_page,
 }
 
+def load_reviews_from_cloud():
+    """Pre-populate session state from Airtable on app start."""
+    if not st.session_state.reviews:
+        user_id = get_user_id()
+        records = airtable_get_records("reviews", user_id)
+        cloud_reviews = []
+        for rec in records:
+            fields = rec.get("fields", {})
+            try:
+                papers_list = json.loads(fields.get("papers", "[]"))
+            except:
+                papers_list = []
+            try:
+                meta_dict = json.loads(fields.get("meta", "{}"))
+            except:
+                meta_dict = {}
+            cloud_reviews.append({
+                "title": fields.get("title", "Untitled"),
+                "date": fields.get("created_at", now_str()),
+                "text": fields.get("review_text", ""),
+                "papers": papers_list,
+                "meta": meta_dict,
+            })
+        if cloud_reviews:
+            st.session_state.reviews = cloud_reviews
+
 def main() -> None:
+    load_reviews_from_cloud()
     if st.session_state.page not in PAGE_FN:
         st.session_state.page = "Home"
     _sidebar()
