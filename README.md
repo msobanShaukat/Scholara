@@ -103,7 +103,7 @@ The prompt design is completely hand‑crafted for this app — no template or t
 *Full review displayed, download buttons for TXT and DOCX.*
 
 ### 4. Cloud Dashboard
-![Cloud](screenshots/DATABASE ACT_AI.PNG) 
+![Cloud](screenshots/CLOUD.PNG) 
 *All reviews persisted in Airtable, searchable and sortable.*
 
 *You can take screenshots directly from your deployed URL using your browser’s screenshot tool.*
