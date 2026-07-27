@@ -47,10 +47,9 @@
 - **Reviews persist** across sessions — no data loss on refresh
 
 ### 🔒 Privacy & Security
-- **PDFs are never stored** — processed in‑session only  
-- **API keys** kept securely on Streamlit Cloud (never in the repo)  
+- **Cloud‑backed reviews via Airtable** — Dashboard shows all previous reviews. Uploaded PDFs are processed in‑session only and are not stored.
+- **API keys** kept securely on Streamlit Cloud (never in the repo)
 - **Accessible** — keyboard navigation, focus outlines, skip‑to‑main‑content link
-
 ---
 
 ## 🧠 The AI Feature (Gemini‑Powered Review Generation)
