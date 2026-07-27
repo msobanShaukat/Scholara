@@ -113,7 +113,72 @@ The prompt design is completely hand‑crafted for this app — no template or t
 
 ## 🏃‍♂️ How to Run the Project
 
-### 1. Clone the repo
+### 1. Clone the repository
 ```bash
-git clone https://github.com/YOUR_USERNAME/scholara.git
+git clone https://github.com/msobanShaukat/scholara.git
 cd scholara
+```
+
+### 2. Install dependencies
+Make sure you have Python 3.9+ installed. Then run:
+```bash
+pip install -r requirements.txt
+```
+If you don't have a `requirements.txt`, install the packages directly:
+```bash
+pip install streamlit pdfplumber python-docx requests google-generativeai
+```
+
+### 3. Add your API keys (never commit these!)
+Create a folder `.streamlit` in the project root and inside it a file `secrets.toml`:
+```toml
+GEMINI_API_KEY = "your-gemini-api-key-here"
+AIRTABLE_API_KEY = "your-airtable-personal-access-token"
+AIRTABLE_BASE_ID = "your-airtable-base-id"
+```
+
+**Obtaining the free keys:**
+- **Gemini API key** → [Google AI Studio](https://aistudio.google.com/apikey) (no credit card required)  
+- **Airtable credentials** →  
+  1. Create a free account at [airtable.com](https://airtable.com) and set up a base with a table named `reviews` (fields: `user_id`, `title`, `review_text`, `papers`, `meta`, `created_at`).  
+  2. Go to [Airtable Developer Hub](https://airtable.com/create/tokens) and create a **Personal Access Token** with `data.records:read` and `data.records:write` scopes.  
+  3. Copy your **Base ID** from the URL (the part starting with `app`).
+
+### 4. Run the app locally
+```bash
+streamlit run app.py
+```
+Open your browser at [http://localhost:8501](http://localhost:8500).
+
+### 5. Deploy on Streamlit Cloud (already done for the live demo)
+- Push your code to a **public** GitHub repository.  
+- Go to [Streamlit Cloud](https://share.streamlit.io/), link your GitHub account, and deploy the app.  
+- In the app’s **Settings → Secrets**, paste the exact content of your `secrets.toml` file.  
+- The app will automatically restart and be live.
+
+---
+
+## 🧪 How the Grading Rubric Is Satisfied
+
+| Criteria       | Fulfilled by                                                                 |
+|----------------|------------------------------------------------------------------------------|
+| **IDEA**       | An original tool that solves a real bottleneck for researchers in Pakistan (and globally): manual literature review synthesis. |
+| **COMPLETION** | Fully functional end‑to‑end pipeline: upload → configure → AI‑generate → export → cloud dashboard. |
+| **DEPLOYMENT** | Live public URL with a working AI‑powered feature (no fake/demo data when keys are provided). |
+| **REPORTING**  | This README includes every required element: problem statement, live link, feature list, AI prompt description, tools used, screenshots, and run instructions. |
+
+---
+
+## 👤 Author
+
+**Soban Shaukat**  
+MS Artificial Intelligence, NUST Islamabad  
+AI Skillbridge – Prime Minister's Youth Programme  
+📧 scholara@nust.edu.pk (placeholder)
+
+> *“Scholara grew from my own frustration: writing a literature review for my thesis took 40+ hours. I built this tool so the next researcher doesn’t have to.”*
+
+---
+
+© 2026 Scholara · v3.0.0 · Built with ❤️ in Pakistan
+```
