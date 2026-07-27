@@ -91,19 +91,19 @@ The prompt design is completely hand‑crafted for this app — no template or t
 > *(Replace these placeholders with actual screenshots of your app. Drag & drop the images into your GitHub repo and update the links.)*
 
 ### 1. Home Page
-![Home Page](screenshots/home.png)  
+![HOME](screenshots/home.png)
 *Hero section, trust strip, KPIs, and three quick‑action buttons.*
 
 ### 2. Demo Wizard — Upload & Configure
-![Demo Wizard](screenshots/wizard.png)  
+![DEMO](screenshots/demo.png)
 *Step‑by‑step wizard: upload PDFs, choose citation, depth, tone, optional sections.*
 
 ### 3. Generated Review & Export
-![Generated Review](screenshots/review.png)  
+![REVIEW](screenshots/review.png)   
 *Full review displayed, download buttons for TXT and DOCX.*
 
 ### 4. Cloud Dashboard
-![Dashboard](screenshots/dashboard.png)  
+![Cloud](screenshots/cloud.png) 
 *All reviews persisted in Airtable, searchable and sortable.*
 
 *You can take screenshots directly from your deployed URL using your browser’s screenshot tool.*
